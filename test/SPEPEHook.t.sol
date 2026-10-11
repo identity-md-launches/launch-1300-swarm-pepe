@@ -11,12 +11,17 @@ import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
-import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
+import {SwapParams, ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
+import {Currency} from "v4-core/src/types/Currency.sol";
+import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary.sol";
 import {BalanceDelta, toBalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 abstract contract SwapCases is LaunchFixture {
+    using StateLibrary for IPoolManager;
+    using TransientStateLibrary for IPoolManager;
+
     function test_exactInputBuy() public {
         _trade(true, true, 1_000 ether, false);
     }
@@ -90,6 +95,36 @@ abstract contract SwapCases is LaunchFixture {
         router.swap(key, params, BUDGET, BUDGET);
     }
 
+    function test_rejectedBuyRollsBackPriceBalancesAndClaims() public {
+        _trade(false, true, 1_000 ether, false);
+        (uint160 priceBefore,,,) = manager.getSlot0(key.toId());
+        uint256 feesBefore = hook.accruedFees();
+        uint256 tokenBefore = token.balanceOf(address(this));
+        uint256 pairBefore = IERC20(IMD).balanceOf(address(this));
+        uint256 managerTokenBefore = token.balanceOf(address(manager));
+        uint256 managerPairBefore = IERC20(IMD).balanceOf(address(manager));
+        SwapParams memory params = _params(true, false, hook.maxBuy() + 1, false);
+
+        vm.expectRevert(_wrapped(IHooks.afterSwap.selector, SPEPEHook.MaxBuyExceeded.selector));
+        router.swap(key, params, BUDGET, BUDGET);
+
+        (uint160 priceAfter,,,) = manager.getSlot0(key.toId());
+        assertEq(priceAfter, priceBefore);
+        assertEq(hook.accruedFees(), feesBefore);
+        assertEq(token.balanceOf(address(this)), tokenBefore);
+        assertEq(IERC20(IMD).balanceOf(address(this)), pairBefore);
+        assertEq(token.balanceOf(address(manager)), managerTokenBefore);
+        assertEq(IERC20(IMD).balanceOf(address(manager)), managerPairBefore);
+        assertEq(token.balanceOf(address(router)), 0);
+        assertEq(IERC20(IMD).balanceOf(address(router)), 0);
+        assertEq(manager.balanceOf(address(router), uint160(IMD)), 0);
+        assertEq(manager.currencyDelta(address(hook), Currency.wrap(IMD)), 0);
+        assertEq(manager.getNonzeroDeltaCount(), 0);
+
+        // A rejected buy does not leave the pool locked or poison subsequent swaps.
+        _trade(true, false, 1_000 ether, false);
+    }
+
     function test_limitExpiresAtExactlyOneHour() public {
         vm.warp(hook.openedAt() + 3599);
         assertTrue(hook.limitActive());
@@ -135,6 +170,26 @@ abstract contract SwapCases is LaunchFixture {
         _trade(false, false, 1 << 200, true);
     }
 
+    function test_nearInt256MaxExactOutputCanPartiallyFill() public {
+        // Only the capped reservation is added to amountSpecified by PoolManager.
+        // Its sum fits int256 even though grossing up the unfilled request would not.
+        for (uint256 offset; offset <= 10; ++offset) {
+            vm.roll(hook.openedBlock() + offset);
+            uint256 rate = offset < 10 ? 3_000 - 300 * offset : 0;
+            uint256 largestReserve = (uint256(1) << 127) * rate / 10_000;
+            uint256 largestRequest = uint256(type(int256).max) - largestReserve;
+            _trade(false, false, largestRequest, true);
+            if (rate == 0) {
+                assertEq(_refundClaims(), 0);
+            } else {
+                assertGt(_refundClaims(), 0);
+                SwapParams memory params = _params(false, false, largestRequest + 1, true);
+                vm.expectRevert(_wrapped(IHooks.beforeSwap.selector, SPEPEHook.UnrepresentableFee.selector));
+                router.swap(key, params, BUDGET, BUDGET);
+            }
+        }
+    }
+
     function test_unrepresentableExactOutputFeeHasExplicitError() public {
         SwapParams memory params = _params(false, false, uint256(type(int256).max), true);
         vm.expectRevert(_wrapped(IHooks.beforeSwap.selector, SPEPEHook.UnrepresentableFee.selector));
@@ -149,12 +204,36 @@ abstract contract SwapCases is LaunchFixture {
         assertGt(hook.accruedFees(), 0);
     }
 
-    function test_zeroFillDoesNotCollectFee() public {
-        // Move to the nearest limit, then a zero-liquidity price range is covered separately.
+    function test_oneWeiInputIsFullyRefundedAsClaim() public {
         (,, uint256 fee) = _trade(true, true, 1, false);
         assertEq(fee, 0);
         assertEq(hook.accruedFees(), 0);
         assertEq(_refundClaims(), 1);
+    }
+
+    function test_emptyLiquidityRefundsAllReservationsInEveryMode() public {
+        router.liquidity(key, ModifyLiquidityParams(-887220, 887220, -int256(400_000_000 ether), bytes32(0)), 0, 0);
+        for (uint256 mode; mode < 4; ++mode) {
+            bool buy = mode < 2;
+            bool exactInput = mode % 2 == 0;
+            (BalanceDelta net, BalanceDelta raw, uint256 fee) = _trade(buy, exactInput, 1_000 ether, true);
+            assertEq(BalanceDelta.unwrap(raw), 0, "empty pool unexpectedly filled");
+            assertEq(BalanceDelta.unwrap(net), 0, "zero fill cost the swapper tokens");
+            assertEq(fee, 0);
+            if (buy == exactInput) assertGt(_refundClaims(), 0, "reservation not returned");
+            else assertEq(_refundClaims(), 0);
+        }
+        assertEq(hook.accruedFees(), 0);
+    }
+
+    /// forge-config: default.fuzz.runs = 1000
+    function testFuzz_largePriceLimitedRequests(bool buy, bool exactInput, uint256 seed, uint8 offset) public virtual {
+        vm.roll(hook.openedBlock() + bound(offset, 0, 10));
+        // Leave room for the largest capped reservation at every fee rate.
+        // These requests vastly exceed the actual fill: exercise the capped reserve, not liquidity.
+        uint256 amount = bound(seed, 1e30, uint256(type(int256).max) - (uint256(1) << 127));
+        (BalanceDelta net,,) = _trade(buy, exactInput, amount, true);
+        assertTrue(BalanceDelta.unwrap(net) != 0, "expected a real partial fill");
     }
 
     /// forge-config: default.fuzz.runs = 1000
@@ -182,6 +261,11 @@ contract SPEPEHookToken0Test is SwapCases {
 
     function setUp() public {
         _setup(false, true, false);
+    }
+
+    /// forge-config: default.fuzz.runs = 1000
+    function testFuzz_largePriceLimitedRequests(bool buy, bool exactInput, uint256 seed, uint8 offset) public override {
+        super.testFuzz_largePriceLimitedRequests(buy, exactInput, seed, offset);
     }
 
     /// forge-config: default.fuzz.runs = 1000
@@ -261,6 +345,11 @@ contract SPEPEHookToken0Test is SwapCases {
 contract SPEPEHookToken1Test is SwapCases {
     function setUp() public {
         _setup(false, false, false);
+    }
+
+    /// forge-config: default.fuzz.runs = 1000
+    function testFuzz_largePriceLimitedRequests(bool buy, bool exactInput, uint256 seed, uint8 offset) public override {
+        super.testFuzz_largePriceLimitedRequests(buy, exactInput, seed, offset);
     }
 
     /// forge-config: default.fuzz.runs = 1000

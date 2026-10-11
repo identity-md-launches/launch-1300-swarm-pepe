@@ -77,17 +77,31 @@ forge test
 
 Solidity 0.8.26, Cancun, the optimizer and IR pipeline are pinned in `foundry.toml`; bytecode metadata hashes are disabled. No FFI, filesystem write permissions, external library paths or unlinked libraries are needed.
 
-The fork suite skips explicitly when no RPC URL is configured. Run it against Robinhood Chain:
+The fork suite skips explicitly when no fork is selected. It reads no environment variables. Run it against Robinhood Chain:
 
 ```sh
-ROBINHOOD_RPC_URL=https://rpc.mainnet.chain.robinhood.com forge test --match-contract RobinhoodForkTest -vv
+forge test --match-contract RobinhoodForkTest --fork-url https://rpc.mainnet.chain.robinhood.com -vv
 ```
 
-By default the fork uses current state because the public RPC prunes older state; `ROBINHOOD_FORK_BLOCK` can pin a block when using an archive RPC. Tests do not broadcast transactions. The fork suite verifies chain ID 4663, IMD's symbol and decimals, then deploys the actual token and a CREATE2-mined hook and trades through the deployed PoolManager. Its funding uses Foundry's test-only balance cheatcode.
+By default the fork uses current state because the public RPC prunes older state; add `--fork-block-number NUMBER` to pin a block when using an archive RPC. Only the absence of a selected fork skips the suite: a wrong chain, missing contract or failed swap fails it. Tests do not broadcast transactions. The fork suite verifies chain ID 4663, IMD's symbol and decimals, then deploys the actual token and a CREATE2-mined hook and trades through the deployed PoolManager. Its funding uses Foundry's test-only balance cheatcode.
 
 ## Launch contracts
 
 `SPEPE` is a standard OpenZeppelin ERC-20. It mints exactly 1,000,000,000 tokens with 18 decimals to its deployer, once. There is no public mint, owner, administrator, tax, pause, proxy or upgrade function. The factory handles the 80% pool seed, 10% Merkle distribution and remainder; the token and hook perform none of those allocations.
+
+Deployment parameters for this order:
+
+| Parameter | Value / responsibility |
+| --- | --- |
+| Chain | Robinhood Chain, chain ID 4663 |
+| `$poolManager` | `0x8366a39cc670b4001a1121b8f6a443a643e40951`, passed to the hook constructor |
+| `$token` | The factory's freshly deployed `SPEPE` address |
+| IMD pair | `0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127`, 18 decimals |
+| SIMD fee vault | `0x3dd5f73dd1a4e62630fad3909673f130ad429985`, immutable |
+| Factory distribution | 800,000,000 SPEPE for pool liquidity; 100,000,000 for its Merkle distributor; remaining 100,000,000 to `0xbda087645f96b8c64f15b08875332edb8bc19611` |
+| Opening price | Factory-derived from launch economics and token ordering; manifest Q96 is provenance only |
+
+There are no settings to configure after deployment. The factory must mine the hook address using its actual CREATE2 deployer, the final creation code and both encoded constructor arguments, then deploy and initialize atomically. Changing any of those inputs invalidates an earlier salt/address prediction. After launch, any caller may pay the gas for `sweep()`; no keeper account or administrator is required. Routers are responsible for user slippage bounds and refund-claim redemption.
 
 `SPEPEHook(IPoolManager manager, address token)` is deployed directly. The manifest substitutes `$poolManager` and `$token`; IMD and the hackathon vault are fixed in the implementation. The constructor checks the CREATE2 address permission bits. The low 14 address bits must equal **0x20cc** (8396): `beforeInitialize`, `beforeSwap`, `afterSwap`, `beforeSwapReturnDelta`, and `afterSwapReturnDelta`. All other callbacks are disabled. The tests mine salts and actually deploy the creation code; they do not etch the hook at a chosen address.
 
@@ -108,7 +122,7 @@ For exact-input buys and exact-output sells, IMD is specified. `beforeSwap` rese
 
 `afterSwap` calculates the fee from the actual fill and mints the entire excess reservation as IMD ERC-6909 claims to its `sender` (the swapping caller/router). A partial fill, including a zero fill, pays only for what actually filled. The hook ignores `hookData`; callers cannot direct somebody else's refund elsewhere. The included test router burns its refund claims within the same unlock, settles only its net debt, and returns the unspent input budget. Integrating routers must likewise redeem or pass on these claims; they must not strand users' refunds. Rounding can leave a one-unit refund even on a complete fill.
 
-Large requests use full-precision arithmetic and cap the reservation at the largest fee a v4 `int128` fill could generate, allowing small price-limited fills of very large requests. If a positive specified request plus its required fee would overflow `int256`, `UnrepresentableFee` is returned. Normal PoolManager price, liquidity, balance and settlement constraints still apply.
+Large requests use full-precision arithmetic and cap the reservation at the largest fee a v4 `int128` fill could generate, allowing small price-limited fills of very large requests. The overflow check applies **after capping**: only a positive specified request plus the reservation actually returned to PoolManager can cause `UnrepresentableFee`. Grossing up the entire unfilled request is not grounds for rejection. Normal PoolManager price, liquidity, balance and settlement constraints still apply.
 
 Fees accrue as IMD claims owned by the hook, so swaps do not attempt an IMD transfer before the router has paid. Anyone can call `sweep()` to unlock the manager, redeem those claims and send IMD to **0x3dd5f73dd1a4e62630fad3909673f130ad429985**. No caller can choose a different recipient. A sweep redeems up to the manager's per-operation `int128` bound; additional calls handle larger accumulated balances. The currency is ERC-20 IMD, so ETH reception is irrelevant.
 
@@ -116,23 +130,25 @@ For the first 3,600 seconds, `afterSwap` rejects a **positive launched-token del
 
 ## Verification coverage
 
-Local integration tests cover both token orderings, buys and sells in both exact modes, partial fills in all four modes, proportional fees and refund claims, all ten fee-bearing blocks, the fee expiry, both max-buy boundaries, repeated buys, unrestricted sells, arbitrary callers sweeping, callback authentication, single-pool initialization, extreme specified amounts, runtime escape-opcode scans, and EIP-170/EIP-3860 limits. A fresh-manager test seeds only SPEPE before the first IMD-input buy.
+Local integration tests cover both token orderings, buys and sells in both exact modes, partial fills in all four modes, proportional fees and refund claims, empty-liquidity fills, all ten fee-bearing blocks, the fee expiry, both max-buy boundaries, complete rollback of rejected buys, repeated buys, unrestricted sells, arbitrary callers sweeping, callback authentication, single-pool initialization, extreme specified amounts, runtime escape-opcode scans, and EIP-170/EIP-3860 limits. A fresh-manager test seeds only SPEPE before the first IMD-input buy. At each fee rate, an exact-output sell whose capped reservation brings the request to exactly `int256.max` succeeds with a price-limited fill; one additional requested unit reverts.
 
 Fuzz tests run 1,000 cases per fee/transfer test. Stateful invariants run sequences of swaps, sweeps and time/block advances, independently reconstruct fees from PoolManager swap events, check token conservation and ensure every unlock leaves zero unsettled deltas. The test-only router is under `test/helpers/`; the launch deploys only contracts named in `launch.json`.
 
-The security review focused on manager-only callbacks, immutable policy, exact permissions, specified-side reconciliation, fee conservation, no external token transfers during swaps, no user identity inferred from the router, and fixed-recipient redemption. The hook uses no delegatecall, selfdestruct, proxy, administrator or upgrade mechanism. This is a local implementation review and test report, not an external audit.
+The security review focused on manager-only callbacks, immutable policy, exact permissions, specified-side reconciliation, fee conservation, no external token transfers during swaps, no user identity inferred from the router, and fixed-recipient redemption. The fee equations and the repaired overflow boundary are documented in [`docs/launch-accounting.md`](docs/launch-accounting.md). The hook uses no delegatecall, selfdestruct, proxy, administrator or upgrade mechanism. This is a local implementation review and test report, not an external audit.
 
 ## Recorded checks (2026-10-11)
 
 | Check | Result |
 | --- | --- |
 | `forge build` | Passed with Solidity 0.8.26; compilation performed successfully. |
-| Offline tests | 51 passed; the unconfigured fork suite explicitly skips. |
+| Offline tests | 59 passed; the unconfigured fork suite explicitly skips. |
 | Supplied protected token and hook tests | All 11 passed, including manifest decimals, policy supply and factory initialization. |
-| Robinhood fork, current state via the supplied RPC | All 21 passed, including 1,000 fee fuzz cases. |
+| Robinhood fork, current state via the supplied RPC | All 25 passed, including 1,000 fee fuzz cases and 1,000 large-request fuzz cases. |
 | Stateful accounting invariant | 128 sequences, 4,096 calls, zero reverts. |
 | Logo files | Five options plus selected artifact: opaque RGB PNG, 1024×1024; visually checked at 64 px and in 32 px circles. |
 
-SPEPE creation/runtime sizes are 2,456/1,503 bytes. SPEPEHook creation/runtime sizes are 5,646/4,867 bytes; its two constructor arguments add 64 bytes to initcode. All are within deployment limits.
+SPEPE creation/runtime sizes are 2,456/1,503 bytes. SPEPEHook creation/runtime sizes are 5,664/4,885 bytes; its two constructor arguments add 64 bytes to initcode. All are within deployment limits.
+
+The bounded launch follow-up reproduced an unnecessary `UnrepresentableFee` revert for an exact-output sell requesting `int256.max - floor(2**127 × 3000 / 10000)` with a tight price limit. Moving the overflow check after reservation capping repairs it without changing ordinary swap fees, permissions or constructor arguments. The updated suite verifies the exact accepted/rejected boundary at every fee rate, empty-liquidity refunds, rejected-buy rollback and both token orderings. This changes hook creation code: the launch factory must mine its salt against the final artifact.
 
 An initial historical fork at block 85,796,583 failed because the public RPC had pruned that state; the current-state fork subsequently passed every test. The first invariant run exposed an equal-to-current price limit in the test helper after a direction reversal; offsetting the actual square-root price repaired the helper, and the complete invariant rerun passed. The protected tests were run from unchanged temporary copies with all required probe values supplied; they are not project dependencies.

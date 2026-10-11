@@ -167,10 +167,12 @@ contract SPEPEHook is IUnlockCallback {
         // Works even for int256.min. FullMath avoids an intermediate multiplication overflow.
         uint256 magnitude = exactInput ? uint256(-(amount + 1)) + 1 : uint256(amount);
         reserve = FullMath.mulDivRoundingUp(magnitude, rate, exactInput ? BPS + rate : BPS - rate);
-        if (!exactInput && reserve > uint256(type(int256).max) - magnitude) revert UnrepresentableFee();
         // Actual BalanceDelta components cannot exceed 2**127 in magnitude. Cap the reservation
         // at the largest possible fee, allowing very large requests with small partial fills.
         uint256 maximumFillFee = (uint256(1) << 127) * rate / BPS;
         if (reserve > maximumFillFee) reserve = maximumFillFee;
+        // PoolManager adds only this capped reservation to amountSpecified. Checking the uncapped
+        // quote would reject representable requests that can safely stop at a small partial fill.
+        if (!exactInput && reserve > uint256(type(int256).max) - magnitude) revert UnrepresentableFee();
     }
 }
