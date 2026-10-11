@@ -1,0 +1,11 @@
+{
+  "name": "swarmpepe-site-tools",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Optional static analysis only; the website has no runtime dependencies or compilation step.",
+  "devDependencies": {
+    "axe-core": "4.11.0",
+    "playwright": "1.58.2",
+    "typescript": "5.9.3"
+  }
+}

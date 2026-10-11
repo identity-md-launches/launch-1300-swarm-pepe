@@ -1,8 +1,72 @@
 # Swarm Pepe (SPEPE)
 
-The five image-generated logo options are in [`logos/`](logos/README.md). The selected geometric frog wallet mark is [`artifacts/logo.png`](artifacts/logo.png). Each delivered PNG is an opaque 1024×1024 square.
+The five image-generated logo options are in [`logos/`](logos/README.md). The selected geometric frog wallet mark is [`logos/logo-2.png`](logos/logo-2.png). Each original PNG is an opaque 1024×1024 square. The website uses `logos/logo-1.png` as its default, as required by the website brief, and prefers a valid `logo` from the live feed.
 
 This repository also supplies the required reproducible Foundry launch project: `SPEPE`, `SPEPEHook`, the direct-deployment manifest, and tests using the real Uniswap v4 PoolManager implementation. Dependencies are ordinary vendored source files under `lib/`, with upstream revisions in `lib/versions.json` and their original licenses. No network is required for the default build and test suite.
+
+## Website
+
+The complete, dependency-free website is in [`site/`](site/index.html). The publishable static export is in [`dist/`](dist/index.html). Both contain ordinary HTML, CSS and JavaScript; no compilation or dependency installation is needed to serve either folder. The existing contracts, manifest, Foundry configuration and contract dependencies are preserved.
+
+The eight home sections follow the fetched site brief: hero, illustrated story, live stats, interactive buying guide, supply allocation, eight original downloadable memes, a local meme maker, and community/sharing. The Swarm Signal toy sends a little burst of frogs with each ribbit; its percentage is explicitly fictional and local. The sticker supports dragging, arrow-key movement and Home to reset. A sticky-header pause button and device reduced-motion preferences control motion.
+
+### Install, preview and rebuild
+
+Install Node.js 22 or later to use the optional export/preview/check scripts. The site itself has **zero runtime npm dependencies**.
+
+```sh
+node scripts/build-site.mjs
+node scripts/preview-site.mjs
+```
+
+Open `http://127.0.0.1:4173/preview/`. Stop the preview with Ctrl+C. The preview deliberately serves a local **launching** fixture at `/simd-coin.json`, with no token or market figures. It is never copied into the production export. `PORT` can override the preview port.
+
+The production build is a deterministic static export: the script validates page metadata and local HTML asset references, rejects symlinks/dependency folders, and copies `site/` byte-for-byte to `dist/`. This reconciles the brief’s “no build step” source with the required checked-in production export. Edit `site/`, then rerun the export; never hand-edit `dist/`.
+
+### Typecheck and interaction checks
+
+Pinned development tools and their npm lockfile live in `scripts/site-tools/`. Install them outside the repository so no dependency/cache directory can enter the submission:
+
+```sh
+mkdir -p /tmp/swarmpepe-site-tools
+cp scripts/site-tools/package.json scripts/site-tools/package-lock.json /tmp/swarmpepe-site-tools/
+npm ci --prefix /tmp/swarmpepe-site-tools --cache /tmp/swarmpepe-npm --ignore-scripts --no-audit --no-fund
+node /tmp/swarmpepe-site-tools/node_modules/typescript/bin/tsc -p scripts/site-tools/tsconfig.json
+node --test scripts/test-site.mjs
+```
+
+For browser checks on a fresh machine:
+
+```sh
+PLAYWRIGHT_BROWSERS_PATH=/tmp/swarmpepe-browsers node /tmp/swarmpepe-site-tools/node_modules/playwright/cli.js install chromium
+PLAYWRIGHT_BROWSERS_PATH=/tmp/swarmpepe-browsers node scripts/validate-site.mjs
+```
+
+The browser validator starts its own preview on port 4174, runs Chromium, checks interactions and exports, writes evidence, and closes both processes. `SITE_TOOLS` overrides the tool installation directory; `CHROMIUM_PATH` can select an existing Chromium executable. The worker used its supplied Chromium with:
+
+```sh
+CHROMIUM_PATH=/opt/imd-worker/local/imd-browser-tool/ms-playwright/chromium-1246/chrome-linux64/chrome node scripts/validate-site.mjs
+```
+
+Recorded website results (2026-10-11): production export passed (18 files, 473,012 bytes); JavaScript typecheck passed; 8 unit tests and all 20 browser check groups passed; all 9 tested PNG downloads were valid 1080×1080 images. Home and 404 each had zero detected axe violations at 375px and 1440px; the remaining manual contrast cases and browser limits are in `VALIDATION.md`. The final browser run had no unexpected console errors or failed resources.
+
+The test-only address, market numbers and destinations in the validator are synthetic fixtures. They are absent from both `site/` and `dist/`. Downloaded test PNGs are written to `test/scratch/site/`, outside the submitted export.
+
+### Live data and image downloads
+
+The site requests `/simd-coin.json` on the same origin immediately, every 30 seconds while visible, and when the tab becomes visible. Requests time out after eight seconds; the Refresh control retries. Missing market values are `—`, an absent token is `launching…`, and contract copying stays disabled until a complete nonzero address arrives. Buy and Chart use only their respective feed URLs; before those exist, they lead to the buying guide and stats section. A failed refresh explicitly labels retained values as last-known data.
+
+The launch feed inspected on 2026-10-11 reported `status: building`, no token and no market data. Its actual coin/chart links are read at runtime and are not hardcoded. No official X account was supplied (`x` was null), so the community button opens an X search for the coin; three separate share buttons open prefilled intents. The site makes no wallet connection, submits no personal data, uses no trackers and never sends meme text to a server.
+
+All page artwork and the live meme preview use CSS/SVG with the provided logo. The brief also explicitly requests PNG downloads: a temporary offscreen canvas only rasterizes those downloads to 1080×1080. No canvas renders the interface, and there is no 3D library. Remote selected logos work in the page; exporting them requires the image host to allow CORS. If it does not, PNG export uses the bundled default frog and tells the visitor. Image failure leaves the default mascot usable.
+
+### Publish
+
+Deliver the complete `dist/` directory, including fonts, images, HTML and JavaScript. The IdentityMD publisher serves this export; it does not rebuild it. No deployment or publication command was run. The intended public URL, canonical metadata and share links are `https://swarmpepe.si-md.xyz/`.
+
+Local runtime assets use relative URLs and were checked under `/preview/`, so the export also works at a static-host subpath. The production host supplies the same-origin `/simd-coin.json` endpoint. A plain offline/IPFS mirror without that endpoint shows the honest unavailable/launching state; it still serves the complete site and meme tools. `404.html` is the styled error page; configure the static host to use it for missing pages as appropriate to that host.
+
+Design tokens and reuse rules are in [`DESIGN.md`](DESIGN.md). Actual checks, six-domain design review, screenshots and limitations are recorded in [`VALIDATION.md`](VALIDATION.md). Screenshots and machine-readable reports are emitted under `artifacts/`, which this environment collects separately and excludes from Git. `VALIDATION.md` keeps the review in the repository. The new tooling lockfile is separate from all existing build configuration. No existing package manifest, lockfile, ignore file or dependency was changed.
 
 ## Build and test
 
