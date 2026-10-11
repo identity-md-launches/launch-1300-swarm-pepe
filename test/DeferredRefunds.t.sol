@@ -4,6 +4,8 @@ pragma solidity 0.8.26;
 import {Vm} from "forge-std/Vm.sol";
 import {LaunchFixture} from "./helpers/LaunchFixture.sol";
 import {DeferredRefundRouter} from "./helpers/DeferredRefundRouter.sol";
+import {MockArbSysClock} from "./LaunchClock.t.sol";
+import {IArbSys} from "src/SPEPEHook.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {BalanceDelta, toBalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
@@ -34,7 +36,7 @@ abstract contract DeferredRefundCases is LaunchFixture {
         uint8 blockOffset,
         bytes32 hookData
     ) public virtual {
-        vm.roll(hook.openedBlock() + bound(blockOffset, 0, 12));
+        _rollLaunchBlock(hook.openedBlock() + bound(blockOffset, 0, 12));
         uint256 amount = bound(seed, 1, 1_000_000 ether);
         (uint256 refund,) = _deferredTrade(buy, exactInput, amount, priceLimited, abi.encode(hookData));
         uint256 beforeRedemption = IERC20(IMD).balanceOf(address(this));
@@ -71,8 +73,9 @@ abstract contract DeferredRefundCases is LaunchFixture {
         assertEq(manager.balanceOf(address(this), uint160(IMD)), refundable);
         assertEq(hook.accruedFees(), 0);
 
-        vm.roll(hook.openedBlock() + 100);
+        _rollLaunchBlock(hook.openedBlock() + 100);
         vm.warp(hook.openedAt() + 2 hours);
+        assertEq(hook.feeBps(), 0);
         uint256 beforeRedemption = IERC20(IMD).balanceOf(address(this));
         deferred.redeem(Currency.wrap(IMD), refundable);
         assertEq(IERC20(IMD).balanceOf(address(this)), beforeRedemption + refundable);
@@ -167,7 +170,7 @@ abstract contract DeferredRefundCases is LaunchFixture {
         fee = hook.accruedFees() - feesBefore;
         int256 paired = _paired(raw);
         uint256 gross = uint256(paired < 0 ? -paired : paired);
-        uint256 elapsed = block.number - hook.openedBlock();
+        uint256 elapsed = _launchBlockNumber() - hook.openedBlock();
         uint256 rate = elapsed < 10 ? 3000 - 300 * elapsed : 0;
         assertEq(fee, gross * rate / 10_000, "fee must use the actual fill");
         uint256 accrualEvents;
@@ -216,6 +219,14 @@ abstract contract DeferredRefundCases is LaunchFixture {
         assertEq(token.balanceOf(address(hook)), 0);
         assertEq(IERC20(IMD).balanceOf(address(hook)), 0);
     }
+
+    function _launchBlockNumber() internal view virtual returns (uint256) {
+        return block.number;
+    }
+
+    function _rollLaunchBlock(uint256 number) internal virtual {
+        vm.roll(number);
+    }
 }
 
 contract DeferredRefundToken0Test is DeferredRefundCases {
@@ -258,8 +269,90 @@ contract DeferredRefundToken1Test is DeferredRefundCases {
     }
 }
 
+/// @dev Nitro's local block height is independent of the parent height exposed by NUMBER.
+abstract contract DeferredRefundArbSysCases is DeferredRefundCases {
+    address internal constant ARB_SYS = address(100);
+
+    function _launchBlockNumber() internal view override returns (uint256) {
+        return IArbSys(ARB_SYS).arbBlockNumber();
+    }
+
+    function _rollLaunchBlock(uint256 number) internal override {
+        vm.mockCall(ARB_SYS, abi.encodeCall(IArbSys.arbBlockNumber, ()), abi.encode(number));
+    }
+}
+
+/// @dev Runs the same refund assertions offline with deliberately different local/parent clocks.
+contract DeferredRefundLocalClockTest is DeferredRefundArbSysCases {
+    uint256 internal constant LOCAL_OPEN = 86_000_000;
+    uint256 internal constant PARENT_OPEN = 26_000_000;
+
+    function setUp() public {
+        vm.roll(PARENT_OPEN);
+        vm.etch(ARB_SYS, type(MockArbSysClock).runtimeCode);
+        MockArbSysClock(ARB_SYS).setBlockNumber(LOCAL_OPEN);
+        _setupDeferred(false, true);
+        assertEq(hook.openedBlock(), LOCAL_OPEN);
+    }
+
+    function test_localFeeExpiryLeavesDeferredRefundsRedeemable() public {
+        _rollLaunchBlock(LOCAL_OPEN + 9);
+        assertEq(hook.feeBps(), 300);
+        (uint256 refund, uint256 fee) = _deferredTrade(false, false, 1_000_000 ether, true, "");
+        assertGt(refund, 0);
+        assertGt(fee, 0);
+
+        _rollLaunchBlock(LOCAL_OPEN + 10);
+        assertEq(hook.feeBps(), 0);
+        (uint256 expiredRefund, uint256 expiredFee) = _deferredTrade(true, true, 1_000_000 ether, true, "");
+        assertEq(expiredRefund, 0);
+        assertEq(expiredFee, 0);
+        assertEq(block.number, PARENT_OPEN);
+        assertTrue(hook.limitActive());
+
+        uint256 beforeRedemption = IERC20(IMD).balanceOf(address(this));
+        deferred.redeem(Currency.wrap(IMD), refund);
+        assertEq(IERC20(IMD).balanceOf(address(this)), beforeRedemption + refund);
+        assertEq(hook.accruedFees(), fee);
+        _assertSettled();
+    }
+
+    /// forge-config: default.fuzz.runs = 1000
+    function testFuzz_independentClocksPreserveDeferredAccounting(
+        bool buy,
+        bool exactInput,
+        uint8 localOffset,
+        uint16 parentOffset
+    ) public {
+        uint256 elapsed = bound(localOffset, 0, 12);
+        _rollLaunchBlock(LOCAL_OPEN + elapsed);
+        vm.roll(PARENT_OPEN + parentOffset);
+        assertEq(hook.feeBps(), elapsed < 10 ? 3000 - 300 * elapsed : 0);
+        (uint256 refund,) = _deferredTrade(buy, exactInput, 1_000_000 ether, true, "");
+        uint256 beforeRedemption = IERC20(IMD).balanceOf(address(this));
+        deferred.redeem(Currency.wrap(IMD), refund);
+        assertEq(IERC20(IMD).balanceOf(address(this)), beforeRedemption + refund);
+        assertEq(manager.balanceOf(address(this), uint160(IMD)), 0);
+        _assertSettled();
+    }
+
+    /// forge-config: default.fuzz.runs = 1000
+    function testFuzz_cashPlusDeferredClaimsEqualsActualFillLessFee(
+        bool buy,
+        bool exactInput,
+        bool priceLimited,
+        uint96 seed,
+        uint8 blockOffset,
+        bytes32 hookData
+    ) public override {
+        super.testFuzz_cashPlusDeferredClaimsEqualsActualFillLessFee(
+            buy, exactInput, priceLimited, seed, blockOffset, hookData
+        );
+    }
+}
+
 /// @dev CLI-selected Robinhood forks only. An absent fork is explicitly skipped in offline verification.
-contract DeferredRefundRobinhoodForkTest is DeferredRefundCases {
+contract DeferredRefundRobinhoodForkTest is DeferredRefundArbSysCases {
     function setUp() public {
         try vm.activeFork() returns (uint256) {}
         catch {

@@ -5,7 +5,7 @@ The added suites extend the existing real-PoolManager tests. No dependency insta
 | Suite | Additional behavior checked |
 | --- | --- |
 | `SPEPEHookLifecycle.t.sol` | Invalid constructor arguments and address permission bits; rejection of wrong currencies, static/dynamic fee tiers, spacing and hook identity; failed core initialization rolls back the hook clock; initialization cannot restart either window; independent timestamp/block windows; forged callback callers and payloads. |
-| `DeferredRefunds.t.sol` | All four swap modes with both currency orderings; deferred ERC-6909 refunds, dust rounding, full and price-limited fills, empty liquidity, claim transfers and later redemption; sweep/refund isolation; forged hook data cannot redirect refunds or waive fees; fee-event accounting. |
+| `DeferredRefunds.t.sol` | All four swap modes with both currency orderings; deferred ERC-6909 refunds, dust rounding, full and price-limited fills, empty liquidity, claim transfers and later redemption; sweep/refund isolation; forged hook data cannot redirect refunds or waive fees; fee-event accounting. The local-clock suite repeats these assertions with independent Nitro parent/local heights and checks refund redemption across fee expiry. |
 | `DeferredRefundInvariant.t.sol` | Three holders swap, transfer claims, redeem, sweep, submit rejected buys and advance time in random order. Each currency ordering runs 256 sequences of depth 64, with unexpected reverts treated as failures. The final drain checks that outstanding obligations remain redeemable. |
 | `SPEPEHookSweep.t.sol` | A failed vault transfer preserves claims and can be retried without interrupting swaps; sweeping changes neither pool price, liquidity nor LP fee growth; accumulated claims cross the `int128` boundary and redeem in chunks; buys on a fresh manager with no IMD reserves, in both currency orderings. |
 
@@ -28,9 +28,11 @@ forge test --match-contract '.*RobinhoodForkTest' \
   --fork-url https://rpc.mainnet.chain.robinhood.com --no-storage-caching
 ```
 
-The last command runs both the existing Robinhood suite and the new deferred-refund suite against the supplied deployed PoolManager and IMD addresses. It checks chain ID, token symbol and decimals. On 2026-10-11, this command passed **31 tests, with no failures or skips**, including three 1,000-case fuzz properties.
+The last command runs both the existing Robinhood suite and the deferred-refund suite against the supplied deployed PoolManager and IMD addresses. It checks chain ID, token symbol and decimals. On 2026-10-11, the revised suites passed **32 tests, with no failures or skips**, including three 1,000-case fuzz properties.
 
-An initial attempt to pin RPC block 85,863,111 failed because the public endpoint no longer had that historical state after compilation. The successful run used latest state. With an archive-capable endpoint, add `--fork-block-number` for a reproducible historical snapshot. Hook policy assertions use the hook's EVM opening block and timestamp, not an assumed relation between RPC height and those values.
+An initial attempt to pin RPC block 85,863,111 failed because the public endpoint no longer had that historical state after compilation. The successful run used latest state. With an archive-capable endpoint, add `--fork-block-number` for a reproducible historical snapshot. Hook policy assertions use the local opening block returned by `ArbSys.arbBlockNumber()` on Robinhood and the opening timestamp. `block.number` is used only by plain-EVM suites without ArbSys.
+
+The revision updates the deferred-refund suite to use this local clock too. Before the revision, its six live fork tests failed: ordinary swaps underflowed when subtracting the local opening height from the parent height, and fuzz cases advanced the parent height while the fee clock stayed fixed. The revised fork controls only ArbSys for fee-window advances. An offline suite starts at parent height 26,000,000 and local height 86,000,000, then exercises cash/claim accounting, local offsets 9 and 10, and 1,000 random combinations of independent parent/local advances. Expected fees still come from actual PoolManager fills and the specified decay schedule.
 
 Without a CLI-selected fork, both fork suites explicitly skip in `setUp`; they do not report unexecuted swaps as passing. A selected wrong chain, missing contract, or failed fork assertion fails the suite. No test calls `vm.setEnv` or reads a private RPC credential. Offline verification needs only the committed tests and existing libraries.
 
@@ -39,8 +41,8 @@ Local validation directs generated outputs to `test/scratch/out` and `test/scrat
 ## Validation results (2026-10-11)
 
 - `forge build`: passed with Solidity 0.8.26 and the existing project configuration.
-- Default `forge test`: **96 passed, 0 failed, 2 skipped** (the two offline fork setups).
-- Live Robinhood fork command above: **31 passed, 0 failed, 0 skipped**.
+- Default `forge test`: **120 passed, 0 failed, 2 skipped** (the two offline fork setups), including eight offline deferred-refund local-clock tests.
+- Live Robinhood fork command above: **32 passed, 0 failed, 0 skipped**.
 - New invariant suites: **32,768 calls**, with zero unexpected reverts. The preserved invariant adds another 4,096 calls.
 - No reproducible implementation defect was found in the exercised cases. No implementation changes or additional dependencies were needed.
 
