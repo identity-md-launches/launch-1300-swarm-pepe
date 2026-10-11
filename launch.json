@@ -1,0 +1,16 @@
+{
+  "kind": "univ4_hook",
+  "token": {"contract": "SPEPE", "name": "Swarm Pepe", "symbol": "SPEPE", "decimals": 18},
+  "hook": {
+    "contract": "SPEPEHook",
+    "constructorArgs": ["$poolManager", "$token"],
+    "permissions": ["beforeInitialize", "beforeSwap", "afterSwap", "beforeSwapReturnDelta", "afterSwapReturnDelta"]
+  },
+  "pool": {
+    "pairedCurrency": "0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "notes": "Direct SPEPEHook constructor takes PoolManager and launch token in that order. Mine CREATE2 for low 14 bits 0x20cc. IMD and the SIMD vault 0x3dd5f73dd1a4e62630fad3909673f130ad429985 are fixed. Static 1.25% LP fee plus an IMD hook fee starting at 30% in the initialization block, decreasing by 3 percentage points per block to zero at offset 10. Fees use actual fills, with specified-side excess refunded as ERC-6909 claims to the swapping caller/router. Anyone may sweep accrued IMD claims to the vault. For the first 60 minutes, each buy is capped at 10 million SPEPE. The token mints the entire 1 billion SPEPE supply to its deployer; distribution and opening price are set by the launch factory."
+}
