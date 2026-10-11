@@ -12,6 +12,10 @@ import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, toBeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
 
+interface IArbSys {
+    function arbBlockNumber() external view returns (uint256);
+}
+
 /// @notice Immutable SPEPE/IMD launch hook. No administrator and no mutable policy.
 contract SPEPEHook is IUnlockCallback {
     error NotPoolManager();
@@ -33,6 +37,7 @@ contract SPEPEHook is IUnlockCallback {
     uint256 public constant ANTI_SNIPE_BLOCKS = 10;
     uint256 public constant START_FEE_BPS = 3_000;
     uint256 private constant BPS = 10_000;
+    address private constant ARB_SYS = address(100);
 
     bool public initialized;
     uint256 public openedAt;
@@ -74,8 +79,8 @@ contract SPEPEHook is IUnlockCallback {
         ) revert InvalidPool();
         initialized = true;
         openedAt = block.timestamp;
-        openedBlock = block.number;
-        emit Opened(block.number, block.timestamp);
+        openedBlock = _launchBlockNumber();
+        emit Opened(openedBlock, block.timestamp);
         return IHooks.beforeInitialize.selector;
     }
 
@@ -87,11 +92,18 @@ contract SPEPEHook is IUnlockCallback {
         return initialized && block.timestamp - openedAt < LIMIT_DURATION;
     }
 
-    /// @notice 3000, 2700, ... 300 bps at offsets 0..9; zero from offset 10.
+    /// @notice 3000, 2700, ... 300 bps at Robinhood block offsets 0..9; zero from offset 10.
     function feeBps() public view returns (uint256) {
         if (!initialized) return 0;
-        uint256 elapsed = block.number - openedBlock;
+        uint256 elapsed = _launchBlockNumber() - openedBlock;
         return elapsed < ANTI_SNIPE_BLOCKS ? START_FEE_BPS * (ANTI_SNIPE_BLOCKS - elapsed) / ANTI_SNIPE_BLOCKS : 0;
+    }
+
+    function _launchBlockNumber() private view returns (uint256) {
+        // Nitro's NUMBER opcode tracks the parent chain. ArbSys returns the local chain height.
+        // A plain EVM test chain has no ArbSys; it uses NUMBER for its local height instead.
+        if (ARB_SYS.code.length == 0) return block.number;
+        return IArbSys(ARB_SYS).arbBlockNumber();
     }
 
     function beforeSwap(address, PoolKey calldata key, SwapParams calldata params, bytes calldata)

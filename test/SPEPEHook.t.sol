@@ -67,7 +67,7 @@ abstract contract SwapCases is LaunchFixture {
     function test_feeDecayEveryBlockAndBoundary() public {
         uint256 start = hook.openedBlock();
         for (uint256 i; i <= 11; ++i) {
-            vm.roll(start + i);
+            _rollLaunchBlock(start + i);
             assertEq(hook.feeBps(), i < 10 ? 3000 - 300 * i : 0);
             _trade(true, true, 100 ether, false);
             _trade(false, false, 100 ether, false);
@@ -174,7 +174,7 @@ abstract contract SwapCases is LaunchFixture {
         // Only the capped reservation is added to amountSpecified by PoolManager.
         // Its sum fits int256 even though grossing up the unfilled request would not.
         for (uint256 offset; offset <= 10; ++offset) {
-            vm.roll(hook.openedBlock() + offset);
+            _rollLaunchBlock(hook.openedBlock() + offset);
             uint256 rate = offset < 10 ? 3_000 - 300 * offset : 0;
             uint256 largestReserve = (uint256(1) << 127) * rate / 10_000;
             uint256 largestRequest = uint256(type(int256).max) - largestReserve;
@@ -228,7 +228,7 @@ abstract contract SwapCases is LaunchFixture {
 
     /// forge-config: default.fuzz.runs = 1000
     function testFuzz_largePriceLimitedRequests(bool buy, bool exactInput, uint256 seed, uint8 offset) public virtual {
-        vm.roll(hook.openedBlock() + bound(offset, 0, 10));
+        _rollLaunchBlock(hook.openedBlock() + bound(offset, 0, 10));
         // Leave room for the largest capped reservation at every fee rate.
         // These requests vastly exceed the actual fill: exercise the capped reserve, not liquidity.
         uint256 amount = bound(seed, 1e30, uint256(type(int256).max) - (uint256(1) << 127));
@@ -241,8 +241,12 @@ abstract contract SwapCases is LaunchFixture {
         public
         virtual
     {
-        vm.roll(hook.openedBlock() + bound(offset, 0, 12));
+        _rollLaunchBlock(hook.openedBlock() + bound(offset, 0, 12));
         _trade(buy, exactInput, bound(amount, 1 ether, 1_000_000 ether), priceLimited);
+    }
+
+    function _rollLaunchBlock(uint256 number) internal virtual {
+        vm.roll(number);
     }
 
     function _wrapped(bytes4 callback, bytes4 reason) internal view returns (bytes memory) {

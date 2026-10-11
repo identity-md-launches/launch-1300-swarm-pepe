@@ -85,6 +85,8 @@ forge test --match-contract RobinhoodForkTest --fork-url https://rpc.mainnet.cha
 
 By default the fork uses current state because the public RPC prunes older state; add `--fork-block-number NUMBER` to pin a block when using an archive RPC. Only the absence of a selected fork skips the suite: a wrong chain, missing contract or failed swap fails it. Tests do not broadcast transactions. The fork suite verifies chain ID 4663, IMD's symbol and decimals, then deploys the actual token and a CREATE2-mined hook and trades through the deployed PoolManager. Its funding uses Foundry's test-only balance cheatcode.
 
+The fork suite uses Foundry's Nitro support (tested with Forge 1.8.3): native `ArbSys.arbBlockNumber()` identifies the fork's local height, while `block.number` is its parent height. Setup verifies both against RPC calls at that local block, then initializes and swaps with the native precompile. Tests that advance the fee window mock only the ArbSys response, independently from the parent height. Offline regressions likewise vary the two heights separately; `vm.roll` alone does not advance Nitro's local-block clock.
+
 ## Launch contracts
 
 `SPEPE` is a standard OpenZeppelin ERC-20. It mints exactly 1,000,000,000 tokens with 18 decimals to its deployer, once. There is no public mint, owner, administrator, tax, pause, proxy or upgrade function. The factory handles the 80% pool seed, 10% Merkle distribution and remainder; the token and hook perform none of those allocations.
@@ -101,7 +103,7 @@ Deployment parameters for this order:
 | Factory distribution | 800,000,000 SPEPE for pool liquidity; 100,000,000 for its Merkle distributor; remaining 100,000,000 to `0xbda087645f96b8c64f15b08875332edb8bc19611` |
 | Opening price | Factory-derived from launch economics and token ordering; manifest Q96 is provenance only |
 
-There are no settings to configure after deployment. The factory must mine the hook address using its actual CREATE2 deployer, the final creation code and both encoded constructor arguments, then deploy and initialize atomically. Changing any of those inputs invalidates an earlier salt/address prediction. After launch, any caller may pay the gas for `sweep()`; no keeper account or administrator is required. Routers are responsible for user slippage bounds and refund-claim redemption.
+There are no settings to configure after deployment. The factory must mine the hook address using its actual CREATE2 deployer, the final creation code and both encoded constructor arguments, then deploy and initialize atomically. Changing any of those inputs invalidates an earlier salt/address prediction. After launch, any caller may pay the gas for `sweep()`; no keeper account or administrator is required. Routers are responsible for user slippage bounds and refund-claim redemption. During the ten-block fee window, **exact-input buys and exact-output sells require a claim-aware router**; see the settlement requirements below.
 
 `SPEPEHook(IPoolManager manager, address token)` is deployed directly. The manifest substitutes `$poolManager` and `$token`; IMD and the hackathon vault are fixed in the implementation. The constructor checks the CREATE2 address permission bits. The low 14 address bits must equal **0x20cc** (8396): `beforeInitialize`, `beforeSwap`, `afterSwap`, `beforeSwapReturnDelta`, and `afterSwapReturnDelta`. All other callbacks are disabled. The tests mine salts and actually deploy the creation code; they do not etch the hook at a chosen address.
 
@@ -111,7 +113,9 @@ The pool fee stays at 1.25%. The hook neither uses the dynamic-fee flag nor call
 
 ## Hook mechanics
 
-The additional IMD fee is 30% in the initialization block, then 27%, 24%, …, 3% in block offsets 1 through 9, and zero at offset 10. The basis is the absolute IMD amount in the real pool `BalanceDelta`; for IMD input this includes the static pool fee. Final hook fees round down to whole minor units. The hook never swaps, burns or donates the paired token. Burning an ERC-6909 claim during redemption does not burn IMD.
+The additional IMD fee is 30% in the initialization block, then 27%, 24%, …, 3% in **Robinhood block** offsets 1 through 9, and zero at offset 10. Both initialization and fee calculation read `ArbSys(0x0000000000000000000000000000000000000064).arbBlockNumber()`. Nitro's `block.number` reports an ancestor-chain height, so it is unsuitable for this ten-local-block window; see [Arbitrum's clock documentation](https://docs.arbitrum.io/arbitrum-essentials/arbitrum-vs-ethereum/block-numbers-and-time). A plain EVM without code at ArbSys falls back to `block.number`; the constructor makes no precompile call. The window is measured in blocks, with no promised wall-clock duration.
+
+The fee basis is the absolute IMD amount in the real pool `BalanceDelta`; for IMD input this includes the static pool fee. Final hook fees round down to whole minor units, ensuring the charge never exceeds the rate on the actual fill. Nonzero dust fills can therefore pay zero, and rounding benefits the swapper by less than one IMD minor unit (`10^-18` IMD). The hook never swaps, burns or donates the paired token. Burning an ERC-6909 claim during redemption does not burn IMD.
 
 For exact-output buys and exact-input sells, IMD is the unspecified currency: `afterSwap` takes the fee directly from the actual IMD delta using `afterSwapReturnDelta`.
 
@@ -120,7 +124,11 @@ For exact-input buys and exact-output sells, IMD is specified. `beforeSwap` rese
 - Exact input reserves `ceil(A × r / (1 + r))`, leaving the rest of the input budget for the pool.
 - Exact output reserves `ceil(A × r / (1 - r))`, increasing the gross pool output to cover the fee.
 
-`afterSwap` calculates the fee from the actual fill and mints the entire excess reservation as IMD ERC-6909 claims to its `sender` (the swapping caller/router). A partial fill, including a zero fill, pays only for what actually filled. The hook ignores `hookData`; callers cannot direct somebody else's refund elsewhere. The included test router burns its refund claims within the same unlock, settles only its net debt, and returns the unspent input budget. Integrating routers must likewise redeem or pass on these claims; they must not strand users' refunds. Rounding can leave a one-unit refund even on a complete fill.
+`afterSwap` calculates the fee from the actual fill and mints the entire excess reservation as IMD ERC-6909 claims to its `sender` (the swapping caller/router). Counting cash and refund claims, a partial fill, including a zero fill, pays only for what actually filled. The hook ignores `hookData`; callers cannot direct somebody else's refund elsewhere. Rounding can leave a one-unit refund even on a complete fill.
+
+**Router integration requirement:** during the fee window, exact-input buys and exact-output sells must use a router that handles IMD refund claims. For a specified IMD side, `PoolManager.swap` returns the raw IMD cash delta `q - R`, while `R - fee` belongs to the caller as claims. An exact-output sell with gross fill `q < R` therefore returns a **negative IMD cash delta**: a cash-only router may demand IMD payment on the sell, or revert when it expects a positive output (`TAKE_ALL` style). A cash-only exact-input buy can strand a much larger partial-fill refund, as well as dust on full fills. Claims minted to a router without redemption/forwarding functionality are inaccessible to its user; they are not sent to the vault.
+
+Before interpreting output credit or settling tokens, the integrating router should burn the claims received by that swap inside the same unlock, then read its updated `PoolManager.currencyDelta`. The resulting IMD delta is `q - fee`, which is nonnegative for sells, and requires no IMD input budget on a sell. It must pass the resulting cash refund/proceeds to its user. Forwarding claims instead requires explicit user support and may still require temporary IMD funding; it is not equivalent to cash settlement. The included `test/helpers/LaunchRouter.sol` demonstrates same-unlock redemption, and `test/RouterRefunds.t.sol` demonstrates both the cash-only failure and the supported settlement. It is a test helper, not a deployed production router. Production launch routing must implement and verify this handling; the hook has no router allowlist. Exact-output buys and exact-input sells use only the unspecified-side fee and need no refund handling for this hook. From local block offset 10, no mode creates new refund claims.
 
 Large requests use full-precision arithmetic and cap the reservation at the largest fee a v4 `int128` fill could generate, allowing small price-limited fills of very large requests. The overflow check applies **after capping**: only a positive specified request plus the reservation actually returned to PoolManager can cause `UnrepresentableFee`. Grossing up the entire unfilled request is not grounds for rejection. Normal PoolManager price, liquidity, balance and settlement constraints still apply.
 
@@ -141,14 +149,17 @@ The security review focused on manager-only callbacks, immutable policy, exact p
 | Check | Result |
 | --- | --- |
 | `forge build` | Passed with Solidity 0.8.26; compilation performed successfully. |
-| Offline tests | 59 passed; the unconfigured fork suite explicitly skips. |
-| Supplied protected token and hook tests | All 11 passed, including manifest decimals, policy supply and factory initialization. |
-| Robinhood fork, current state via the supplied RPC | All 25 passed, including 1,000 fee fuzz cases and 1,000 large-request fuzz cases. |
+| `forge fmt --check` | Passed. |
+| Offline tests | 75 passed; the unconfigured fork suite explicitly skips. |
+| Supplied protected token and hook tests (earlier accepted round) | All 11 passed, including manifest decimals, policy supply and factory initialization. |
+| Robinhood fork, current state via the supplied RPC | All 26 passed, including 1,000 fee fuzz cases and 1,000 large-request fuzz cases. |
 | Stateful accounting invariant | 128 sequences, 4,096 calls, zero reverts. |
 | Logo files | Five options plus selected artifact: opaque RGB PNG, 1024×1024; visually checked at 64 px and in 32 px circles. |
 
-SPEPE creation/runtime sizes are 2,456/1,503 bytes. SPEPEHook creation/runtime sizes are 5,664/4,885 bytes; its two constructor arguments add 64 bytes to initcode. All are within deployment limits.
+SPEPE creation/runtime sizes are 2,456/1,503 bytes. SPEPEHook creation/runtime sizes are 5,730/4,951 bytes; its two constructor arguments add 64 bytes to initcode. All are within deployment limits.
 
 The bounded launch follow-up reproduced an unnecessary `UnrepresentableFee` revert for an exact-output sell requesting `int256.max - floor(2**127 × 3000 / 10000)` with a tight price limit. Moving the overflow check after reservation capping repairs it without changing ordinary swap fees, permissions or constructor arguments. The updated suite verifies the exact accepted/rejected boundary at every fee rate, empty-liquidity refunds, rejected-buy rollback and both token orderings. This changes hook creation code: the launch factory must mine its salt against the final artifact.
 
 An initial historical fork at block 85,796,583 failed because the public RPC had pruned that state; the current-state fork subsequently passed every test. The first invariant run exposed an equal-to-current price limit in the test helper after a direction reversal; offsetting the actual square-root price repaired the helper, and the complete invariant rerun passed. The protected tests were run from unchanged temporary copies with all required probe values supplied; they are not project dependencies.
+
+The clock/router review revision changes the fee clock to native ArbSys local blocks and adds six independent-clock tests plus ten router/rounding regressions. Final checks passed: `forge build`, `forge test` (75 passed, one unconfigured fork setup skipped), `forge fmt --check`, and the separate Robinhood fork suite (26 passed). Responses to all three findings are in `.imd-responses.json`: the clock is fixed; the cash-only proof and round-up recommendation are disputed against the explicit claim-refund and fee-rate requirements. The reproduced cash-only routing limitation remains and is stated in the manifest notes and settlement requirements above. Re-mine the deployment salt against the final hook artifact.
