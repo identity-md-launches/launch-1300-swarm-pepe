@@ -1,10 +1,24 @@
 {
   "kind": "univ4_hook",
-  "token": {"contract": "SPEPE", "name": "Swarm Pepe", "symbol": "SPEPE", "decimals": 18},
+  "token": {
+    "contract": "SPEPE",
+    "name": "Swarm Pepe",
+    "symbol": "SPEPE",
+    "decimals": 18
+  },
   "hook": {
     "contract": "SPEPEHook",
-    "constructorArgs": ["$poolManager", "$token"],
-    "permissions": ["beforeInitialize", "beforeSwap", "afterSwap", "beforeSwapReturnDelta", "afterSwapReturnDelta"]
+    "constructorArgs": [
+      "$poolManager",
+      "$token"
+    ],
+    "permissions": [
+      "beforeInitialize",
+      "beforeSwap",
+      "afterSwap",
+      "beforeSwapReturnDelta",
+      "afterSwapReturnDelta"
+    ]
   },
   "pool": {
     "pairedCurrency": "0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127",
@@ -12,5 +26,5 @@
     "tickSpacing": 60,
     "initialPrice": "79228162514264337593543950336"
   },
-  "notes": "Direct SPEPEHook constructor takes PoolManager and launch token in that order. Mine CREATE2 for low 14 bits 0x20cc. IMD and the SIMD vault 0x3dd5f73dd1a4e62630fad3909673f130ad429985 are fixed. Static 1.25% LP fee plus an IMD hook fee starting at 30% in the initialization Robinhood block, decreasing by 3 percentage points per local block to zero at offset 10; initialization and fee calculation use ArbSys(0x0000000000000000000000000000000000000064).arbBlockNumber(), with block.number only when ArbSys has no code on a plain EVM. Fees use actual fills, with specified-side excess refunded as ERC-6909 claims to the swapping caller/router. During the fee window, exact-input buys and exact-output sells require a claim-aware router that redeems refunds before cash settlement and output-credit checks. A partial exact-output sell can return a negative raw IMD cash delta: a cash-only router may demand IMD on a sell, revert, or strand refunds; refund claims must be burned and the resulting currencyDelta used for net settlement. Fees round down, so dust fills may pay zero and even full fills may receive a one-unit refund claim. Anyone may sweep accrued IMD claims to the vault. For the first 60 minutes, each buy is capped at 10 million SPEPE. The token mints the entire 1 billion SPEPE supply to its deployer; distribution and opening price are set by the launch factory."
+  "notes": "SPEPE has no constructor arguments and mints the entire 1 billion SPEPE supply once to its deployer. SPEPEHook is deployed directly, with constructor(IPoolManager manager_, address token_) resolved as $poolManager, then $token. Mine its CREATE2 address so the low 14 bits equal 0x20cc, matching the five declared getHookPermissions flags. The contracts have no owner, setters, proxy or upgrade mechanism. IMD is fixed at 0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127; the SIMD Hackathon vault is fixed at construction to 0x3dd5f73dd1a4e62630fad3909673f130ad429985. Only PoolManager may invoke callbacks. beforeInitialize accepts this hook's SPEPE/IMD pool at static fee 12500 and tick spacing 60, and records the opening time and local block once. The 1.25% LP fee is never overridden. On top of it, the IMD hook fee is 30% at local block offset 0, falls by 3 percentage points per block through offset 9, and is zero from offset 10. The clock uses ArbSys.arbBlockNumber(), falling back to block.number only where ArbSys has no code. Fees round down on the actual filled IMD BalanceDelta. For unspecified-side IMD, afterSwap returns the fee delta; for specified-side IMD, beforeSwap reserves a fee and afterSwap refunds the excess as ERC-6909 claims to the swapping caller/router, including partial and zero fills. During the fee window, exact-input buys and exact-output sells need a router that handles those claims: redeem refunds before cash settlement and output-credit checks, then settle the resulting currencyDelta. A partial exact-output sell can have a negative raw IMD cash delta; a cash-only router can demand IMD on a sell, revert or strand refunds. Dust fills may pay zero and even full fills may receive a one-unit refund claim. Accrued fees remain IMD claims held by the hook; anyone may call sweep() to redeem them to the fixed vault, without swapping, burning currency or donating inside the pool. For 60 minutes after initialization, afterSwap rejects actual SPEPE output above maxBuy(), 10 million SPEPE, with MaxBuyExceeded; limitActive() reports this window. Sells and swaps after the window have no max-buy restriction. The manifest's initialPrice is provenance only; the factory derives the opening price and performs supply distribution under the separate launch policy."
 }
