@@ -87,7 +87,8 @@ abstract contract LaunchFixture is Test {
     function _deployHook(IPoolManager pm, address launchToken) internal returns (SPEPEHook deployed) {
         bytes memory code = abi.encodePacked(type(SPEPEHook).creationCode, abi.encode(pm, launchToken));
         for (uint256 i = 0; i < 200_000; ++i) {
-            if (!HookFlags.matches(_predict(code, bytes32(i)), HookFlags.SPEPE_FLAGS)) continue;
+            address predicted = _predict(code, bytes32(i));
+            if (!HookFlags.matches(predicted, HookFlags.SPEPE_FLAGS) || predicted.code.length != 0) continue;
             return new SPEPEHook{salt: bytes32(i)}(pm, launchToken);
         }
         revert("no CREATE2 salt found");
